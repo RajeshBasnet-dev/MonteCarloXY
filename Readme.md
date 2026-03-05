@@ -75,8 +75,8 @@ L = V₀ − Vₜ
 ### 1. Clone Repository
 
 ```bash
-git clone https://github.com/RajeshBasnet-dev/MonteCarloX.git
-cd MonteCarloX
+git clone https://github.com/RajeshBasnet-dev/MonteCarloXY
+cd MonteCarloXY
 ````
 
 ### 2. Create Virtual Environment
