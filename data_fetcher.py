@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
 TRADING_DAYS = 252
 
 
@@ -51,8 +52,7 @@ def estimate_drift_vol(data: pd.DataFrame) -> tuple[float, float, float, pd.Seri
     return s0, mu, sigma_hist, returns
 
 
-def ml_volatility_forecast(data: pd.DataFrame) -> float:
-    """Train a simple RandomForest model to predict next-day realized volatility."""
+def _build_feature_frame(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     df = data.copy()
     df["Return"] = df["Close"].pct_change()
     df["RollingVol_5"] = df["Return"].rolling(5).std()
@@ -62,25 +62,42 @@ def ml_volatility_forecast(data: pd.DataFrame) -> float:
     df["VolumeChange"] = df["Volume"].pct_change()
     df["RSI_14"] = compute_rsi(df["Close"], 14)
 
-    realized_vol = df["Return"].rolling(21).std().shift(-1)
     features = df[["RollingVol_5", "RollingVol_21", "MA_10", "MA_50", "VolumeChange", "RSI_14"]]
+    target = df["Return"].rolling(21).std().shift(-1)
+    return features, target
 
-    model_df = pd.concat([features, realized_vol.rename("Target")], axis=1).dropna()
+
+def volatility_forecast_with_source(data: pd.DataFrame) -> tuple[float, str]:
+    """Forecast annualized volatility and return the source label.
+
+    Source labels:
+    - "ml_random_forest" when sklearn is available and model training succeeds
+    - "historical_fallback" when sklearn/features are unavailable
+    """
+    features, target = _build_feature_frame(data)
+    model_df = pd.concat([features, target.rename("Target")], axis=1).dropna()
+
+    hist_fallback = float(data["Close"].pct_change().dropna().std() * np.sqrt(TRADING_DAYS))
     if len(model_df) < 60:
-        return float(df["Return"].std() * np.sqrt(TRADING_DAYS))
-
-    x = model_df.drop(columns=["Target"])
-    y = model_df["Target"]
+        return hist_fallback, "historical_fallback"
 
     try:
         from sklearn.ensemble import RandomForestRegressor
+
+        x = model_df.drop(columns=["Target"])
+        y = model_df["Target"]
 
         model = RandomForestRegressor(n_estimators=200, random_state=42, min_samples_leaf=3, n_jobs=-1)
         model.fit(x, y)
 
         latest_features = features.dropna().iloc[[-1]]
-        predicted_daily_vol = float(model.predict(latest_features)[0])
-        predicted_daily_vol = max(predicted_daily_vol, 1e-6)
-        return float(predicted_daily_vol * np.sqrt(TRADING_DAYS))
+        predicted_daily_vol = max(float(model.predict(latest_features)[0]), 1e-6)
+        return float(predicted_daily_vol * np.sqrt(TRADING_DAYS)), "ml_random_forest"
     except Exception:
-        return float(df["Return"].std() * np.sqrt(TRADING_DAYS))
+        return hist_fallback, "historical_fallback"
+
+
+def ml_volatility_forecast(data: pd.DataFrame) -> float:
+    """Backward-compatible volatility accessor returning only value."""
+    sigma, _ = volatility_forecast_with_source(data)
+    return sigma

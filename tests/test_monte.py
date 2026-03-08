@@ -2,9 +2,11 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+from data_fetcher import volatility_forecast_with_source
 from monte_engine import simulate_price_paths, terminal_returns
 from risk_metrics import calculate_risk_metrics
 
@@ -27,3 +29,15 @@ def test_engine_stability_no_nans():
     rets = terminal_returns(paths)
     assert np.isfinite(paths).all()
     assert np.isfinite(rets).all()
+
+
+def test_volatility_fallback_without_large_training_window():
+    rng = np.random.default_rng(1)
+    close = 100 * np.exp(np.cumsum(rng.normal(0.0004, 0.01, 40)))
+    volume = rng.integers(1_000_000, 5_000_000, 40)
+    data = pd.DataFrame({"Close": close, "Volume": volume})
+
+    sigma, source = volatility_forecast_with_source(data)
+    assert np.isfinite(sigma)
+    assert sigma > 0
+    assert source == "historical_fallback"

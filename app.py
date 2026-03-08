@@ -6,7 +6,7 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
-from data_fetcher import estimate_drift_vol, fetch_stock_data, ml_volatility_forecast
+from data_fetcher import estimate_drift_vol, fetch_stock_data, volatility_forecast_with_source
 from monte_engine import convergence_series, simulate_price_paths, terminal_returns
 from risk_metrics import calculate_risk_metrics
 
@@ -29,7 +29,7 @@ if run:
     with st.spinner("Fetching market data and simulating paths..."):
         data = fetch_stock_data(ticker)
         s0, mu, sigma_hist, _ = estimate_drift_vol(data)
-        sigma_ml = ml_volatility_forecast(data)
+        sigma_ml, sigma_source = volatility_forecast_with_source(data)
 
         s0_used = manual_price if manual_price > 0 else s0
         sigma_used = manual_vol if manual_vol > 0 else sigma_ml
@@ -56,8 +56,11 @@ if run:
 
     st.info(
         f"Fetched {ticker} | S0={s0:.2f}, mu={mu:.2%}, hist sigma={sigma_hist:.2%}, "
-        f"ML sigma={sigma_ml:.2%}, used sigma={sigma_used:.2%} | runtime={elapsed:.3f}s"
+        f"forecast sigma={sigma_ml:.2%} ({sigma_source}), used sigma={sigma_used:.2%} | runtime={elapsed:.3f}s"
     )
+
+    if sigma_source != "ml_random_forest":
+        st.warning("scikit-learn is unavailable or insufficient data for ML training; using historical volatility fallback.")
 
     t_axis = np.linspace(0, years, n_steps + 1)
     show_paths = min(300, n_sims)
