@@ -1,103 +1,193 @@
-"""Market data utilities and ML-based volatility estimation."""
+"""Market data utilities and ML feature engineering for MonteCarloXY."""
 
 from __future__ import annotations
+
+import importlib.util
+import logging
 
 import numpy as np
 import pandas as pd
 
 TRADING_DAYS = 252
+MIN_HIST_ROWS_FOR_ML = 180
+MIN_FEATURE_ROWS_FOR_ML = 120
+
+logger = logging.getLogger(__name__)
 
 
-def compute_rsi(prices: pd.Series, window: int = 14) -> pd.Series:
-    delta = prices.diff()
-    gain = delta.clip(lower=0).rolling(window).mean()
-    loss = (-delta.clip(upper=0)).rolling(window).mean()
-    rs = gain / (loss + 1e-12)
-    return 100 - (100 / (1 + rs))
-
-
-def _synthetic_data(period_days: int = 504) -> pd.DataFrame:
+def _synthetic_price_data(tickers: list[str], period_days: int = 756) -> pd.DataFrame:
+    """Create synthetic adjusted close prices as an offline fallback."""
     rng = np.random.default_rng(7)
-    returns = rng.normal(0.0004, 0.012, period_days)
-    close = 100 * np.exp(np.cumsum(returns))
-    volume = rng.integers(1_000_000, 5_000_000, size=period_days)
     idx = pd.date_range(end=pd.Timestamp.today(), periods=period_days, freq="B")
-    return pd.DataFrame({"Close": close, "Volume": volume}, index=idx)
+    prices: dict[str, np.ndarray] = {}
+
+    for i, ticker in enumerate(tickers):
+        drift = 0.0002 + (0.0001 * (i % 4))
+        vol = 0.01 + (0.002 * (i % 3))
+        returns = rng.normal(drift, vol, period_days)
+        prices[ticker] = 100 * np.exp(np.cumsum(returns))
+
+    return pd.DataFrame(prices, index=idx)
 
 
-def fetch_stock_data(ticker: str, period: str = "2y") -> pd.DataFrame:
-    """Download historical OHLCV market data; fallback to synthetic demo data."""
+def fetch_stock_data(tickers: list[str], period: str = "5y") -> pd.DataFrame:
+    """Fetch adjusted close data for one or many tickers from yfinance."""
+    clean_tickers = [t.strip().upper() for t in tickers if t.strip()]
+    if not clean_tickers:
+        raise ValueError("Please provide at least one ticker.")
+
     try:
         import yfinance as yf
 
-        data = yf.download(ticker, period=period, auto_adjust=True, progress=False)
+        data = yf.download(clean_tickers, period=period, auto_adjust=True, progress=False)
+
         if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
-        data = data.dropna().copy()
-        if not data.empty and {"Close", "Volume"}.issubset(data.columns):
-            return data
-    except Exception:
-        pass
+            close = data["Close"].copy()
+        elif "Close" in data.columns:
+            close = data[["Close"]].rename(columns={"Close": clean_tickers[0]})
+        else:
+            close = data.copy()
 
-    return _synthetic_data()
+        close = close.dropna(how="all").ffill().dropna(how="any")
+        if not close.empty:
+            close.columns = [str(c).upper() for c in close.columns]
+            return close
+    except Exception as exc:
+        logger.info("yfinance download failed, using synthetic fallback: %s", exc)
 
-
-def estimate_drift_vol(data: pd.DataFrame) -> tuple[float, float, float, pd.Series]:
-    """Compute annualized drift and volatility from historical returns."""
-    close = data["Close"]
-    returns = close.pct_change().dropna()
-    s0 = float(close.iloc[-1])
-    mu = float(returns.mean() * TRADING_DAYS)
-    sigma_hist = float(returns.std() * np.sqrt(TRADING_DAYS))
-    return s0, mu, sigma_hist, returns
+    return _synthetic_price_data(clean_tickers)
 
 
-def _build_feature_frame(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
-    df = data.copy()
-    df["Return"] = df["Close"].pct_change()
-    df["RollingVol_5"] = df["Return"].rolling(5).std()
-    df["RollingVol_21"] = df["Return"].rolling(21).std()
-    df["MA_10"] = df["Close"].rolling(10).mean()
-    df["MA_50"] = df["Close"].rolling(50).mean()
-    df["VolumeChange"] = df["Volume"].pct_change()
-    df["RSI_14"] = compute_rsi(df["Close"], 14)
-
-    features = df[["RollingVol_5", "RollingVol_21", "MA_10", "MA_50", "VolumeChange", "RSI_14"]]
-    target = df["Return"].rolling(21).std().shift(-1)
-    return features, target
+def compute_returns(price_df: pd.DataFrame) -> pd.DataFrame:
+    """Compute daily percentage returns from adjusted close prices."""
+    returns = price_df.pct_change().dropna(how="any")
+    if returns.empty:
+        raise ValueError("Not enough history to compute returns.")
+    return returns
 
 
-def volatility_forecast_with_source(data: pd.DataFrame) -> tuple[float, str]:
-    """Forecast annualized volatility and return the source label.
+def portfolio_return_series(returns: pd.DataFrame, weights: np.ndarray) -> pd.Series:
+    """Build daily portfolio returns from asset returns and allocation weights."""
+    return pd.Series(returns.to_numpy() @ weights, index=returns.index, name="portfolio_return")
 
-    Source labels:
-    - "ml_random_forest" when sklearn is available and model training succeeds
-    - "historical_fallback" when sklearn/features are unavailable
-    """
-    features, target = _build_feature_frame(data)
-    model_df = pd.concat([features, target.rename("Target")], axis=1).dropna()
 
-    hist_fallback = float(data["Close"].pct_change().dropna().std() * np.sqrt(TRADING_DAYS))
-    if len(model_df) < 60:
-        return hist_fallback, "historical_fallback"
+def build_ml_features(portfolio_returns: pd.Series, window: int = 21) -> pd.DataFrame:
+    """Construct rolling features and targets for return/volatility prediction."""
+    df = pd.DataFrame(index=portfolio_returns.index)
+    df["ret"] = portfolio_returns
+    df["rolling_mean_5"] = portfolio_returns.rolling(5, min_periods=5).mean()
+    df["rolling_mean_21"] = portfolio_returns.rolling(window, min_periods=window).mean()
+    df["rolling_vol_5"] = portfolio_returns.rolling(5, min_periods=5).std()
+    df["rolling_vol_21"] = portfolio_returns.rolling(window, min_periods=window).std()
+    df["momentum_10"] = (1 + portfolio_returns).rolling(10, min_periods=10).apply(np.prod, raw=True) - 1
+
+    df["target_next_return"] = portfolio_returns.shift(-1)
+    df["target_next_vol"] = portfolio_returns.rolling(window, min_periods=window).std().shift(-1)
+    return df
+
+
+def _sklearn_available() -> bool:
+    return importlib.util.find_spec("sklearn") is not None
+
+
+def ai_forecast_return_vol(portfolio_returns: pd.Series) -> dict[str, float | str | int | bool]:
+    """Predict next-period return and volatility with robust fallback behavior."""
+    n_hist_rows = int(portfolio_returns.shape[0])
+    base_mu = float(portfolio_returns.mean() * TRADING_DAYS)
+    base_sigma = max(float(portfolio_returns.std() * np.sqrt(TRADING_DAYS)), 1e-6)
+
+    feature_frame = build_ml_features(portfolio_returns)
+    model_df = feature_frame.dropna().copy()
+    n_feature_rows = int(model_df.shape[0])
+
+    sklearn_ok = _sklearn_available()
+
+    logger.info("Historical rows fetched: %d", n_hist_rows)
+    logger.info("Rows after feature engineering: %d", n_feature_rows)
+
+    if n_hist_rows < MIN_HIST_ROWS_FOR_ML:
+        mode = "historical_fallback"
+        logger.info("ML mode: fallback (insufficient history: %d < %d)", n_hist_rows, MIN_HIST_ROWS_FOR_ML)
+        return {
+            "mu_annual": base_mu,
+            "sigma_annual": base_sigma,
+            "source": mode,
+            "mode_label": f"Historical fallback (need >= {MIN_HIST_ROWS_FOR_ML} rows)",
+            "n_hist_rows": n_hist_rows,
+            "n_feature_rows": n_feature_rows,
+            "sklearn_available": sklearn_ok,
+        }
+
+    if n_feature_rows < MIN_FEATURE_ROWS_FOR_ML:
+        mode = "historical_fallback"
+        logger.info(
+            "ML mode: fallback (insufficient feature rows: %d < %d)",
+            n_feature_rows,
+            MIN_FEATURE_ROWS_FOR_ML,
+        )
+        return {
+            "mu_annual": base_mu,
+            "sigma_annual": base_sigma,
+            "source": mode,
+            "mode_label": f"Historical fallback (features < {MIN_FEATURE_ROWS_FOR_ML} rows)",
+            "n_hist_rows": n_hist_rows,
+            "n_feature_rows": n_feature_rows,
+            "sklearn_available": sklearn_ok,
+        }
+
+    if not sklearn_ok:
+        mode = "historical_fallback"
+        logger.info("ML mode: fallback (scikit-learn unavailable)")
+        return {
+            "mu_annual": base_mu,
+            "sigma_annual": base_sigma,
+            "source": mode,
+            "mode_label": "Historical fallback (scikit-learn missing)",
+            "n_hist_rows": n_hist_rows,
+            "n_feature_rows": n_feature_rows,
+            "sklearn_available": sklearn_ok,
+        }
 
     try:
         from sklearn.ensemble import RandomForestRegressor
 
-        x = model_df.drop(columns=["Target"])
-        y = model_df["Target"]
+        features = [
+            "rolling_mean_5",
+            "rolling_mean_21",
+            "rolling_vol_5",
+            "rolling_vol_21",
+            "momentum_10",
+        ]
+        x = model_df[features]
 
-        model = RandomForestRegressor(n_estimators=200, random_state=42, min_samples_leaf=3, n_jobs=-1)
-        model.fit(x, y)
+        model_ret = RandomForestRegressor(n_estimators=250, random_state=42, min_samples_leaf=2, n_jobs=-1)
+        model_vol = RandomForestRegressor(n_estimators=250, random_state=42, min_samples_leaf=2, n_jobs=-1)
 
-        latest_features = features.dropna().iloc[[-1]]
-        predicted_daily_vol = max(float(model.predict(latest_features)[0]), 1e-6)
-        return float(predicted_daily_vol * np.sqrt(TRADING_DAYS)), "ml_random_forest"
-    except Exception:
-        return hist_fallback, "historical_fallback"
+        model_ret.fit(x, model_df["target_next_return"])
+        model_vol.fit(x, model_df["target_next_vol"])
 
+        latest = x.iloc[[-1]]
+        pred_ret_daily = float(model_ret.predict(latest)[0])
+        pred_vol_daily = max(float(model_vol.predict(latest)[0]), 1e-6)
 
-def ml_volatility_forecast(data: pd.DataFrame) -> float:
-    """Backward-compatible volatility accessor returning only value."""
-    sigma, _ = volatility_forecast_with_source(data)
-    return sigma
+        logger.info("ML mode: trained RandomForestRegressor")
+        return {
+            "mu_annual": pred_ret_daily * TRADING_DAYS,
+            "sigma_annual": pred_vol_daily * np.sqrt(TRADING_DAYS),
+            "source": "ml_random_forest",
+            "mode_label": "ML model (Random Forest)",
+            "n_hist_rows": n_hist_rows,
+            "n_feature_rows": n_feature_rows,
+            "sklearn_available": sklearn_ok,
+        }
+    except Exception as exc:
+        logger.info("ML training failed, using fallback: %s", exc)
+        return {
+            "mu_annual": base_mu,
+            "sigma_annual": base_sigma,
+            "source": "historical_fallback",
+            "mode_label": "Historical fallback (ML training failed)",
+            "n_hist_rows": n_hist_rows,
+            "n_feature_rows": n_feature_rows,
+            "sklearn_available": sklearn_ok,
+        }

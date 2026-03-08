@@ -1,34 +1,50 @@
-"""Financial risk metrics for Monte Carlo outputs."""
+"""Financial risk metrics for Monte Carlo portfolio simulations."""
 
 from __future__ import annotations
 
 import numpy as np
 
+TRADING_DAYS = 252
 
-def calculate_risk_metrics(terminal_returns: np.ndarray, confidence: float = 0.95) -> dict[str, float]:
-    """Return VaR, CVaR, Sharpe, and max drawdown from terminal returns."""
-    if terminal_returns.size == 0:
-        raise ValueError("terminal_returns cannot be empty")
 
-    alpha = 1 - confidence
-    var_level = np.percentile(terminal_returns, 100 * alpha)
-    var_95 = -float(var_level)
+def calculate_risk_metrics(
+    paths: np.ndarray,
+    daily_returns: np.ndarray,
+    confidence: float = 0.95,
+    risk_free_rate: float = 0.02,
+) -> dict[str, float]:
+    """Compute professional risk analytics from simulation outputs."""
+    if paths.size == 0 or daily_returns.size == 0:
+        raise ValueError("paths and daily_returns cannot be empty")
 
-    tail = terminal_returns[terminal_returns <= var_level]
-    cvar_95 = -float(np.mean(tail)) if tail.size > 0 else var_95
+    terminal = (paths[-1] / paths[0]) - 1.0
 
-    mean_ret = float(np.mean(terminal_returns))
-    std_ret = float(np.std(terminal_returns))
-    sharpe = mean_ret / std_ret if std_ret > 0 else 0.0
+    alpha = 1.0 - confidence
+    var_cutoff = np.percentile(terminal, 100 * alpha)
+    tail = terminal[terminal <= var_cutoff]
 
-    equity_curve = np.cumprod(1 + terminal_returns)
-    running_max = np.maximum.accumulate(equity_curve)
-    drawdowns = (equity_curve - running_max) / running_max
+    expected_terminal_return = float(np.mean(terminal))
+    terminal_volatility = float(np.std(terminal))
+
+    flat_daily = daily_returns.reshape(-1)
+    mean_daily = float(np.mean(flat_daily))
+    std_daily = float(np.std(flat_daily))
+
+    annual_return = mean_daily * TRADING_DAYS
+    annual_volatility = std_daily * np.sqrt(TRADING_DAYS)
+    sharpe = (annual_return - risk_free_rate) / annual_volatility if annual_volatility > 0 else 0.0
+
+    running_max = np.maximum.accumulate(paths, axis=0)
+    drawdowns = (paths - running_max) / running_max
     max_drawdown = abs(float(np.min(drawdowns)))
 
     return {
-        "VaR_95": var_95,
-        "CVaR_95": cvar_95,
+        "VaR_95": -float(var_cutoff),
+        "CVaR_95": -float(np.mean(tail)) if tail.size else -float(var_cutoff),
+        "Expected_Return": expected_terminal_return,
+        "Terminal_Volatility": terminal_volatility,
+        "Annualized_Return": annual_return,
+        "Annualized_Volatility": annual_volatility,
         "Sharpe_Ratio": sharpe,
         "Max_Drawdown": max_drawdown,
     }
