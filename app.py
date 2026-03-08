@@ -18,6 +18,9 @@ st.set_page_config(page_title="MonteCarloXY", layout="wide")
 st.title("MonteCarloXY — AI-Powered Portfolio Risk & Monte Carlo Dashboard")
 st.caption("Real market data + machine learning forecasts + vectorized simulation analytics")
 
+if "monte_engine" not in st.session_state:
+    st.session_state["monte_engine"] = None
+
 with st.sidebar:
     st.header("1) Stock Selection")
     tickers_raw = st.text_input("Tickers (comma-separated)", value="AAPL,MSFT,GOOGL")
@@ -72,7 +75,34 @@ if run:
         bands = percentile_bands(paths, percentiles=(5, 50, 95))
         conv = convergence_series(paths)
 
+        st.session_state["monte_engine"] = {
+            "tickers": tickers,
+            "years": years,
+            "prices": prices,
+            "ai_forecast": ai_forecast,
+            "paths": paths,
+            "metrics": metrics,
+            "term_rets": term_rets,
+            "bands": bands,
+            "conv": conv,
+            "elapsed": elapsed,
+        }
+
+monte_state = st.session_state.get("monte_engine")
+
+if monte_state is None:
+    st.write("Configure the dashboard from the sidebar and click **Run AI-Powered Simulation**.")
+else:
     st.subheader("4) AI Prediction Insights")
+    ai_forecast = monte_state["ai_forecast"]
+    metrics = monte_state["metrics"]
+    paths = monte_state["paths"]
+    bands = monte_state["bands"]
+    term_rets = monte_state["term_rets"]
+    conv = monte_state["conv"]
+    years = float(monte_state["years"])
+    elapsed = float(monte_state["elapsed"])
+
     a1, a2, a3 = st.columns(3)
     a1.metric("AI Annual Return Estimate", f"{ai_forecast['mu_annual']:.2%}")
     a2.metric("AI Annual Volatility Estimate", f"{ai_forecast['sigma_annual']:.2%}")
@@ -120,16 +150,14 @@ if run:
     fig_conv = go.Figure(data=[go.Scatter(y=conv, mode="lines", line=dict(color="#2ca02c", width=2))])
     fig_conv.update_layout(title="Convergence of Mean Final Portfolio Value", xaxis_title="Number of Simulations", yaxis_title="Running Mean Final Value", template="plotly_white")
 
-    st.plotly_chart(fig_paths, use_container_width=True)
+    st.plotly_chart(fig_paths, width="stretch")
     p1, p2 = st.columns(2)
-    p1.plotly_chart(fig_terminal, use_container_width=True)
-    p2.plotly_chart(fig_returns, use_container_width=True)
+    p1.plotly_chart(fig_terminal, width="stretch")
+    p2.plotly_chart(fig_returns, width="stretch")
 
     p3, p4 = st.columns(2)
-    p3.plotly_chart(fig_risk, use_container_width=True)
-    p4.plotly_chart(fig_conv, use_container_width=True)
+    p3.plotly_chart(fig_risk, width="stretch")
+    p4.plotly_chart(fig_conv, width="stretch")
 
     st.subheader("7) Data Snapshot")
-    st.dataframe(prices.tail(10), use_container_width=True)
-else:
-    st.write("Configure the dashboard from the sidebar and click **Run AI-Powered Simulation**.")
+    st.dataframe(monte_state["prices"].tail(10), width="stretch")
