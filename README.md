@@ -94,3 +94,9 @@ pytest -q
 ## Notes
 - This project is for educational/research use and does not constitute financial advice.
 - Historical performance and simulation outputs are not guarantees of future returns.
+
+## ML Reliability and Fallback Behavior
+- The app validates data sufficiency before ML training (minimum historical rows + minimum engineered feature rows).
+- Rolling features are generated first and `dropna()` is applied only after full feature/target construction to avoid unnecessary data loss.
+- If scikit-learn is missing or data is insufficient, the app automatically switches to historical volatility and labels the prediction source in the UI.
+- Debug telemetry is exposed (historical rows, feature rows, scikit-learn availability, selected prediction mode).

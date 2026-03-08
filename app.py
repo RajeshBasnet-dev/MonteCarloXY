@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
@@ -9,6 +11,8 @@ import streamlit as st
 from data_fetcher import ai_forecast_return_vol, compute_returns, fetch_stock_data, portfolio_return_series
 from monte_engine import convergence_series, percentile_bands, simulate_portfolio_paths, terminal_returns
 from risk_metrics import calculate_risk_metrics
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 
 st.set_page_config(page_title="MonteCarloXY", layout="wide")
 st.title("MonteCarloXY — AI-Powered Portfolio Risk & Monte Carlo Dashboard")
@@ -72,7 +76,12 @@ if run:
     a1, a2, a3 = st.columns(3)
     a1.metric("AI Annual Return Estimate", f"{ai_forecast['mu_annual']:.2%}")
     a2.metric("AI Annual Volatility Estimate", f"{ai_forecast['sigma_annual']:.2%}")
-    a3.metric("Forecast Source", str(ai_forecast["source"]))
+    a3.metric("Forecast Source", str(ai_forecast["mode_label"]))
+
+    st.caption(
+        f"Debug | price rows: {ai_forecast['n_hist_rows']} | feature rows: {ai_forecast['n_feature_rows']} | "
+        f"scikit-learn available: {ai_forecast['sklearn_available']}"
+    )
 
     st.subheader("5) Portfolio Risk Analytics")
     c1, c2, c3, c4 = st.columns(4)

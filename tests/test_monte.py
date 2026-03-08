@@ -6,7 +6,12 @@ import pandas as pd
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from data_fetcher import ai_forecast_return_vol, compute_returns, portfolio_return_series
+from data_fetcher import (
+    MIN_HIST_ROWS_FOR_ML,
+    ai_forecast_return_vol,
+    compute_returns,
+    portfolio_return_series,
+)
 from monte_engine import simulate_portfolio_paths, terminal_returns
 from risk_metrics import calculate_risk_metrics
 
@@ -56,12 +61,12 @@ def test_engine_stability_no_nans():
     assert np.isfinite(rets).all()
 
 
-def test_ai_forecast_fallback_or_model_output_is_valid():
+def test_ai_forecast_includes_debug_metadata_and_valid_source():
     rng = np.random.default_rng(4)
     prices = pd.DataFrame(
         {
-            "AAA": 100 * np.exp(np.cumsum(rng.normal(0.0004, 0.012, 120))),
-            "BBB": 90 * np.exp(np.cumsum(rng.normal(0.0002, 0.009, 120))),
+            "AAA": 100 * np.exp(np.cumsum(rng.normal(0.0004, 0.012, 260))),
+            "BBB": 90 * np.exp(np.cumsum(rng.normal(0.0002, 0.009, 260))),
         }
     )
     returns = compute_returns(prices)
@@ -72,3 +77,14 @@ def test_ai_forecast_fallback_or_model_output_is_valid():
     assert np.isfinite(forecast["sigma_annual"])
     assert forecast["sigma_annual"] > 0
     assert forecast["source"] in {"ml_random_forest", "historical_fallback"}
+    assert isinstance(forecast["n_hist_rows"], int)
+    assert isinstance(forecast["n_feature_rows"], int)
+    assert "mode_label" in forecast
+
+
+def test_ai_forecast_uses_fallback_when_history_is_too_short():
+    rng = np.random.default_rng(5)
+    short_returns = pd.Series(rng.normal(0.0005, 0.01, MIN_HIST_ROWS_FOR_ML - 20))
+    forecast = ai_forecast_return_vol(short_returns)
+    assert forecast["source"] == "historical_fallback"
+    assert "need >=" in str(forecast["mode_label"])
